@@ -183,11 +183,12 @@ pub struct UserOutcomeAction {
     pub merge_question: Option<MergeQuestion>,
 }
 
-/// Body for `splitOutcome` / `mergeOutcome` (amount in quote units; None = max for merge).
+/// Body for `splitOutcome` / `mergeOutcome` (amount in quote units; null = max for merge).
+/// `amount` must always be present in the wire payload (null when max) so the msgpack
+/// matches what the server signs — do NOT skip it when None.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SplitMergeOutcome {
     pub outcome: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub amount: Option<String>,
 }
 
@@ -199,11 +200,10 @@ pub struct NegateOutcome {
     pub amount: String,
 }
 
-/// Body for `mergeQuestion` (None = max).
+/// Body for `mergeQuestion` (null = max). `amount` always present (null when max).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MergeQuestion {
     pub question: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub amount: Option<String>,
 }
 
@@ -1682,10 +1682,10 @@ mod tests {
             r#"{"type":"userOutcome","negateOutcome":{"question":5,"outcome":123,"amount":"10.0"}}"#
         );
 
-        // mergeQuestion with max (amount omitted)
+        // mergeQuestion with max → amount must be present as null (not omitted)
         let a = Action::UserOutcome(UserOutcomeAction::merge_question(5, None));
         let json = serde_json::to_string(&a).unwrap();
-        assert_eq!(json, r#"{"type":"userOutcome","mergeQuestion":{"question":5}}"#);
+        assert_eq!(json, r#"{"type":"userOutcome","mergeQuestion":{"question":5,"amount":null}}"#);
 
         // round-trip
         let back: Action = serde_json::from_str(&json).unwrap();
