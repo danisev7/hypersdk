@@ -165,6 +165,65 @@ pub enum Action {
     #[from(skip)]
     #[serde(rename = "hip3LiquidatorTransfer")]
     Hip3LiquidatorTransfer(Hip3LiquidatorTransferAction),
+    /// HIP-4 outcome market collateral ops (split/merge/negate/mergeQuestion). L1-signed.
+    #[from(skip)]
+    UserOutcome(UserOutcomeAction),
+}
+
+/// HIP-4 `userOutcome` action body. Exactly one field is set per action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserOutcomeAction {
+    #[serde(rename = "splitOutcome", skip_serializing_if = "Option::is_none")]
+    pub split_outcome: Option<SplitMergeOutcome>,
+    #[serde(rename = "mergeOutcome", skip_serializing_if = "Option::is_none")]
+    pub merge_outcome: Option<SplitMergeOutcome>,
+    #[serde(rename = "negateOutcome", skip_serializing_if = "Option::is_none")]
+    pub negate_outcome: Option<NegateOutcome>,
+    #[serde(rename = "mergeQuestion", skip_serializing_if = "Option::is_none")]
+    pub merge_question: Option<MergeQuestion>,
+}
+
+/// Body for `splitOutcome` / `mergeOutcome` (amount in quote units; None = max for merge).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SplitMergeOutcome {
+    pub outcome: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+}
+
+/// Body for `negateOutcome` (requires both question and outcome).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NegateOutcome {
+    pub question: u32,
+    pub outcome: u32,
+    pub amount: String,
+}
+
+/// Body for `mergeQuestion` (None = max).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeQuestion {
+    pub question: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+}
+
+impl UserOutcomeAction {
+    /// Split: 1 quote token -> 1 YES + 1 NO of `outcome`.
+    pub fn split(outcome: u32, amount: impl Into<String>) -> Self {
+        Self { split_outcome: Some(SplitMergeOutcome { outcome, amount: Some(amount.into()) }), merge_outcome: None, negate_outcome: None, merge_question: None }
+    }
+    /// Merge: 1 YES + 1 NO of `outcome` -> 1 quote token (None = max).
+    pub fn merge(outcome: u32, amount: Option<String>) -> Self {
+        Self { split_outcome: None, merge_outcome: Some(SplitMergeOutcome { outcome, amount }), negate_outcome: None, merge_question: None }
+    }
+    /// Negate: NO of `outcome` -> YES of every other outcome of `question`.
+    pub fn negate(question: u32, outcome: u32, amount: impl Into<String>) -> Self {
+        Self { split_outcome: None, merge_outcome: None, negate_outcome: Some(NegateOutcome { question, outcome, amount: amount.into() }), merge_question: None }
+    }
+    /// Merge question: 1 YES of each outcome -> 1 quote token (None = max).
+    pub fn merge_question(question: u32, amount: Option<String>) -> Self {
+        Self { split_outcome: None, merge_outcome: None, negate_outcome: None, merge_question: Some(MergeQuestion { question, amount }) }
+    }
 }
 
 impl Action {
@@ -286,7 +345,8 @@ impl Action {
             | Action::CDeposit { .. }
             | Action::CWithdraw { .. }
             | Action::ReserveRequestWeight { .. }
-            | Action::Hip3LiquidatorTransfer(_) => {
+            | Action::Hip3LiquidatorTransfer(_)
+            | Action::UserOutcome(_) => {
                 let connection_id = self.hash(nonce, maybe_vault_address, expires_after)?;
                 let agent = solidity::Agent {
                     source: if chain.is_mainnet() { "a" } else { "b" }.to_string(),
@@ -414,7 +474,8 @@ impl Action {
             | Action::CDeposit { .. }
             | Action::CWithdraw { .. }
             | Action::ReserveRequestWeight { .. }
-            | Action::Hip3LiquidatorTransfer(_) => {
+            | Action::Hip3LiquidatorTransfer(_)
+            | Action::UserOutcome(_) => {
                 let connection_id = self.hash(nonce, maybe_vault_address, expires_after)?;
                 let agent = solidity::Agent {
                     source: if chain.is_mainnet() { "a" } else { "b" }.to_string(),
@@ -539,7 +600,8 @@ impl Action {
             | Action::CDeposit { .. }
             | Action::CWithdraw { .. }
             | Action::ReserveRequestWeight { .. }
-            | Action::Hip3LiquidatorTransfer(_) => {
+            | Action::Hip3LiquidatorTransfer(_)
+            | Action::UserOutcome(_) => {
                 let expires_after =
                     maybe_expires_after.map(|after| after.timestamp_millis() as u64);
                 let connection_id = self
@@ -1600,5 +1662,33 @@ mod tests {
         );
         assert!(AbstractionMode::from_api_str("unknown").is_err());
         assert!(AbstractionMode::default().is_standard());
+    }
+
+    #[test]
+    fn user_outcome_serialization() {
+        // split: exact JSON order matters (it drives the msgpack hash that gets signed)
+        let a = Action::UserOutcome(UserOutcomeAction::split(123, "10.0"));
+        let json = serde_json::to_string(&a).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"userOutcome","splitOutcome":{"outcome":123,"amount":"10.0"}}"#
+        );
+
+        // negate requires both question and outcome
+        let a = Action::UserOutcome(UserOutcomeAction::negate(5, 123, "10.0"));
+        let json = serde_json::to_string(&a).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"userOutcome","negateOutcome":{"question":5,"outcome":123,"amount":"10.0"}}"#
+        );
+
+        // mergeQuestion with max (amount omitted)
+        let a = Action::UserOutcome(UserOutcomeAction::merge_question(5, None));
+        let json = serde_json::to_string(&a).unwrap();
+        assert_eq!(json, r#"{"type":"userOutcome","mergeQuestion":{"question":5}}"#);
+
+        // round-trip
+        let back: Action = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, Action::UserOutcome(_)));
     }
 }
